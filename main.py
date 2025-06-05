@@ -243,10 +243,14 @@ if 'leituras' not in st.session_state:
 
 # Restaurar backup
 st.sidebar.markdown("🛠️ **Restaurar Backup**")
-arquivos_backup = sorted(
-    [f for f in os.listdir("backup") if f.startswith(f"{usuario_completo}_{session_id}")],
-    reverse=True
-)
+# Verificar se a pasta backup existe antes de listar os arquivos
+if os.path.exists("backup"):
+    arquivos_backup = sorted(
+        [f for f in os.listdir("backup") if f.startswith(f"{usuario_completo}_{session_id}")],
+        reverse=True
+    )
+else:
+    arquivos_backup = []
 
 if arquivos_backup:
     escolha_backup = st.sidebar.selectbox("Selecione um backup para restaurar", arquivos_backup)
