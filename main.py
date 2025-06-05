@@ -27,15 +27,15 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Função para carregar os dados do Supabase
-def carregar_dados(usuario_completo):
-    response = supabase.table("cards").select("*").eq("usuario", usuario_completo).execute()
+def carregar_dados(usuario):
+    response = supabase.table("cards").select("*").eq("usuario", usuario).execute()
     dados = response.data if response.data else []
     return dados
 
 # Função para salvar um card no Supabase
-def salvar_card(usuario_completo, card):
+def salvar_card(usuario, card):
     data = {
-        "usuario": usuario_completo,
+        "usuario": usuario,
         "concurso": card["concurso"],
         "lei": card["lei"],
         "pergunta": card["pergunta"],
@@ -46,7 +46,7 @@ def salvar_card(usuario_completo, card):
     supabase.table("cards").insert(data).execute()
 
 # Função para atualizar um card no Supabase
-def atualizar_card(usuario_completo, card_antigo, card_novo):
+def atualizar_card(usuario, card_antigo, card_novo):
     supabase.table("cards").update({
         "concurso": card_novo["concurso"],
         "lei": card_novo["lei"],
@@ -54,7 +54,7 @@ def atualizar_card(usuario_completo, card_antigo, card_novo):
         "resposta": card_novo["resposta"],
         "referencia": card_novo["referencia"],
         "vezes_lido": card_novo["vezes_lido"]
-    }).eq("usuario", usuario_completo).eq("pergunta", card_antigo["pergunta"]).execute()
+    }).eq("usuario", usuario).eq("pergunta", card_antigo["pergunta"]).execute()
 
 # Função para excluir um card do Supabase usando o id
 def excluir_card(card_id):
@@ -66,10 +66,10 @@ def carregar_dados_json(arquivo):
         return json.load(f)
 
 # Função para criar backup dos dados em formato JSON
-def criar_backup(dados, usuario_completo, session_id):
+def criar_backup(dados, usuario, session_id):
     if dados:
         os.makedirs("backup", exist_ok=True)
-        nome_backup = f"backup/{usuario_completo}_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        nome_backup = f"backup/{usuario}_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(nome_backup, "w", encoding="utf-8") as f_backup:
             json.dump(dados, f_backup, ensure_ascii=False, indent=2)
 
@@ -81,7 +81,7 @@ def validar_usuario(usuario):
     return usuario
 
 # Função para exibir os cards filtrados e paginados
-def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario_completo):
+def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
     filtro_leituras = st.selectbox(
         "Filtrar cards por número de leituras:",
         ["Todos", "Nunca lidos", "1 ou mais", "5 ou mais", "10 ou mais"]
@@ -152,7 +152,7 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario_comple
                     if st.button(f"✅ Lido ({item.get('vezes_lido', 0)}x)", key=f"btn_lido_{i}"):
                         card_antigo = dados[i].copy()
                         dados[i]["vezes_lido"] = item.get("vezes_lido", 0) + 1
-                        atualizar_card(usuario_completo, card_antigo, dados[i])
+                        atualizar_card(usuario, card_antigo, dados[i])
                         st.rerun()
 
                 with col2:
@@ -186,7 +186,6 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario_comple
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
     st.session_state['usuario'] = None
-    st.session_state['usuario_completo'] = None
 if 'session_id' not in st.session_state:
     st.session_state['session_id'] = str(uuid.uuid4())
 
@@ -196,12 +195,8 @@ if not st.session_state['logged_in']:
     if usuario:
         usuario_valido = validar_usuario(usuario)
         if usuario_valido:
-            # Combinar o nome de usuário com o session_id
-            session_id = st.session_state['session_id']
-            usuario_completo = f"{usuario_valido}_{session_id}"
             st.session_state['logged_in'] = True
             st.session_state['usuario'] = usuario_valido
-            st.session_state['usuario_completo'] = usuario_completo
             st.rerun()
         else:
             st.error("❌ Nome de usuário inválido! Use apenas letras, números e sublinhados (ex.: joao123).")
@@ -211,11 +206,10 @@ if not st.session_state['logged_in']:
 
 # Usuário logado
 usuario = st.session_state['usuario']
-usuario_completo = st.session_state['usuario_completo']
 session_id = st.session_state['session_id']
 
 # Carregar os dados
-dados = carregar_dados(usuario_completo)
+dados = carregar_dados(usuario)
 
 # Garantir que todos os cards tenham o campo "vezes_lido"
 for d in dados:
@@ -230,7 +224,6 @@ fonte = st.sidebar.slider("🔠 Tamanho da Fonte (px):", 12, 30, 16)
 if st.sidebar.button("🚪 Sair"):
     st.session_state['logged_in'] = False
     st.session_state['usuario'] = None
-    st.session_state['usuario_completo'] = None
     st.session_state['session_id'] = str(uuid.uuid4())
     st.session_state.clear()
     st.rerun()
@@ -246,7 +239,7 @@ st.sidebar.markdown("🛠️ **Restaurar Backup**")
 # Verificar se a pasta backup existe antes de listar os arquivos
 if os.path.exists("backup"):
     arquivos_backup = sorted(
-        [f for f in os.listdir("backup") if f.startswith(f"{usuario_completo}_{session_id}")],
+        [f for f in os.listdir("backup") if f.startswith(f"{usuario}_{session_id}")],
         reverse=True
     )
 else:
@@ -258,11 +251,11 @@ if arquivos_backup:
         caminho = os.path.join("backup", escolha_backup)
         dados_importados = carregar_dados_json(caminho)
         # Limpar dados atuais do usuário no Supabase
-        supabase.table("cards").delete().eq("usuario", usuario_completo).execute()
+        supabase.table("cards").delete().eq("usuario", usuario).execute()
         # Salvar dados importados
         for item in dados_importados:
-            salvar_card(usuario_completo, item)
-        dados = carregar_dados(usuario_completo)
+            salvar_card(usuario, item)
+        dados = carregar_dados(usuario)
         st.sidebar.success("✅ Backup restaurado com sucesso!")
         st.rerun()
 else:
@@ -277,14 +270,14 @@ if arquivo_json:
     if arquivo_json.size > 2 * 1024 * 1024:  # 2MB
         st.sidebar.error("❌ Arquivo muito grande! Limite: 2MB")
     elif st.sidebar.button("📂 Importar este arquivo"):
-        criar_backup(dados, usuario_completo, session_id)
+        criar_backup(dados, usuario, session_id)
         dados_importados = json.load(arquivo_json)
         # Limpar dados atuais do usuário no Supabase
-        supabase.table("cards").delete().eq("usuario", usuario_completo).execute()
+        supabase.table("cards").delete().eq("usuario", usuario).execute()
         # Salvar dados importados
         for item in dados_importados:
-            salvar_card(usuario_completo, item)
-        dados = carregar_dados(usuario_completo)
+            salvar_card(usuario, item)
+        dados = carregar_dados(usuario)
         st.sidebar.success("✅ Arquivo importado com sucesso!")
         st.rerun()
 
@@ -299,7 +292,7 @@ if concurso_escolhido != "Selecionar":
 
     if lei_escolhida != "Selecionar":
         st.markdown(f"### Cards da Lei **{lei_escolhida}** para o Concurso **{concurso_escolhido}**")
-        perguntas_filtradas = exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario_completo)
+        perguntas_filtradas = exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario)
 
         # ✏️ Editar Card
         if "editar_index" in st.session_state:
@@ -335,7 +328,7 @@ if concurso_escolhido != "Selecionar":
                         )
 
                         novo_card = {
-                            "usuario": usuario_completo,
+                            "usuario": usuario,
                             "pergunta": nova_pergunta_sanitizada,
                             "resposta": nova_resposta_sanitizada,
                             "referencia": nova_referencia,
@@ -343,7 +336,7 @@ if concurso_escolhido != "Selecionar":
                             "lei": nova_lei,
                             "vezes_lido": item.get("vezes_lido", 0)
                         }
-                        atualizar_card(usuario_completo, item, novo_card)
+                        atualizar_card(usuario, item, novo_card)
                         dados[idx] = novo_card
                         del st.session_state["editar_index"]
                         st.success("✅ Sucesso ao alterar!")
@@ -426,7 +419,7 @@ with st.sidebar.form("form_novo_card"):
             )
 
             novo_card = {
-                "usuario": usuario_completo,
+                "usuario": usuario,
                 "concurso": novo_concurso,
                 "lei": nova_lei,
                 "pergunta": nova_pergunta_sanitizada,
@@ -435,7 +428,7 @@ with st.sidebar.form("form_novo_card"):
                 "vezes_lido": 0
             }
             dados.append(novo_card)
-            salvar_card(usuario_completo, novo_card)
+            salvar_card(usuario, novo_card)
             st.sidebar.success("✅ Card adicionado com sucesso!")
             time.sleep(1)
             st.rerun()
