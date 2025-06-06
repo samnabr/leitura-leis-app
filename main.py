@@ -21,6 +21,7 @@ st.set_page_config(page_title="Leitura de Leis por Cards", layout="centered")
 # Configuração do Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Verificar se as credenciais do Supabase estão configuradas
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("❌ Erro: As credenciais do Supabase (SUPABASE_URL e SUPABASE_KEY) devem ser configuradas como variáveis de ambiente.")
     st.stop()
@@ -31,6 +32,11 @@ def carregar_dados(usuario):
     response = supabase.table("cards").select("*").eq("usuario", usuario).execute()
     dados = response.data if response.data else []
     return dados
+
+# Função para verificar se um card já existe (baseado na pergunta)
+def card_existe(usuario, pergunta):
+    response = supabase.table("cards").select("id").eq("usuario", usuario).eq("pergunta", pergunta).execute()
+    return len(response.data) > 0
 
 # Função para salvar um card no Supabase
 def salvar_card(usuario, card):
@@ -62,8 +68,11 @@ def excluir_card(card_id):
 
 # Função para carregar dados de um arquivo JSON (para importação)
 def carregar_dados_json(arquivo):
-    with open(arquivo, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if isinstance(arquivo, str):
+        with open(arquivo, "r", encoding="utf-8") as f:
+            return json.load(f)
+    else:
+        return json.load(arquivo)
 
 # Função para criar backup dos dados em formato JSON
 def criar_backup(dados, usuario, session_id):
@@ -113,12 +122,14 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
     PER_PAGE = 5
     total_paginas = (len(perguntas_filtradas) - 1) // PER_PAGE + 1 if perguntas_filtradas else 1
 
-    if 'pagina' not in st.session_state:
-        st.session_state['pagina'] = 1
+    # Initialize or adjust pagina in session state
+    if 'pagina' not in st.session_state or st.session_state['pagina'] > total_paginas:
+        st.session_state['pagina'] = min(st.session_state.get('pagina', 1), total_paginas)
 
     pagina_atual = st.sidebar.number_input(
         "Página", min_value=1, max_value=total_paginas, value=st.session_state['pagina'], step=1
     )
+    st.session_state['pagina'] = pagina_atual
 
     inicio = (pagina_atual - 1) * PER_PAGE
     fim = inicio + PER_PAGE
@@ -271,14 +282,14 @@ if arquivo_json:
         st.sidebar.error("❌ Arquivo muito grande! Limite: 2MB")
     elif st.sidebar.button("📂 Importar este arquivo"):
         criar_backup(dados, usuario, session_id)
-        dados_importados = json.load(arquivo_json)
-        # Limpar dados atuais do usuário no Supabase
-        supabase.table("cards").delete().eq("usuario", usuario).execute()
-        # Salvar dados importados
+        dados_importados = carregar_dados_json(arquivo_json)
+        novos_cards = 0
         for item in dados_importados:
-            salvar_card(usuario, item)
+            if not card_existe(usuario, item["pergunta"]):
+                salvar_card(usuario, item)
+                novos_cards += 1
         dados = carregar_dados(usuario)
-        st.sidebar.success("✅ Arquivo importado com sucesso!")
+        st.sidebar.success(f"✅ {novos_cards} cards importados com sucesso!")
         st.rerun()
 
 st.markdown("## 🎯 Selecione um concurso para começar")
@@ -365,31 +376,43 @@ st.sidebar.markdown("🔥 **Card mais lido por lei**")
 for lei, item in mais_lido_por_lei.items():
     st.sidebar.markdown(f"**{lei}** → *{item['pergunta'][:50]}...* ({item['vezes_lido']}x)")
 
-# Exportar para Word
+# Exportar para Word (Seletivo)
 st.sidebar.markdown("📄 **Exportar para Word**")
-if st.sidebar.button("⬇️ Baixar meus cards em Word"):
+export_concurso = st.sidebar.selectbox("Exportar cards do concurso:", ["Todos"] + concursos_disponiveis)
+export_lei = st.sidebar.selectbox("Exportar cards da lei:", ["Todas"] + sorted(set(d["lei"] for d in dados if d.get("lei"))))
+
+if st.sidebar.button("⬇️ Baixar cards selecionados em Word"):
     from docx import Document
 
     doc = Document()
     doc.add_heading("Cards de Estudo", 0)
 
-    for item in dados:
-        doc.add_heading(item.get("concurso", "[Concurso]"), level=1)
-        doc.add_heading(item.get("lei", "[Lei]"), level=2)
-        doc.add_paragraph(f"Pergunta: {item['pergunta']}")
-        doc.add_paragraph(f"Resposta: {item['resposta']}")
-        doc.add_paragraph(f"Referência: {item['referencia']}")
-        doc.add_paragraph("")
+    cards_filtrados = dados
+    if export_concurso != "Todos":
+        cards_filtrados = [d for d in cards_filtrados if d.get("concurso") == export_concurso]
+    if export_lei != "Todas":
+        cards_filtrados = [d for d in cards_filtrados if d.get("lei") == export_lei]
 
-    caminho_word = f"cards_{usuario}.docx"
-    doc.save(caminho_word)
-    with open(caminho_word, "rb") as file:
-        st.download_button(
-            label="📥 Clique aqui para baixar",
-            data=file,
-            file_name=caminho_word,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+    if not cards_filtrados:
+        st.sidebar.error("❌ Nenhum card encontrado com os filtros selecionados!")
+    else:
+        for item in cards_filtrados:
+            doc.add_heading(item.get("concurso", "[Concurso]"), level=1)
+            doc.add_heading(item.get("lei", "[Lei]"), level=2)
+            doc.add_paragraph(f"Pergunta: {item['pergunta']}")
+            doc.add_paragraph(f"Resposta: {item['resposta']}")
+            doc.add_paragraph(f"Referência: {item['referencia']}")
+            doc.add_paragraph("")
+
+        caminho_word = f"cards_{usuario}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        doc.save(caminho_word)
+        with open(caminho_word, "rb") as file:
+            st.download_button(
+                label="📥 Clique aqui para baixar",
+                data=file,
+                file_name=caminho_word,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("➕ **Cadastrar Novo Card**")
