@@ -32,9 +32,9 @@ def carregar_dados(usuario):
     dados = response.data if response.data else []
     return dados
 
-# Função para verificar se um card já existe (baseado na pergunta)
-def card_existe(usuario, pergunta):
-    response = supabase.table("cards").select("id").eq("usuario", usuario).eq("pergunta", pergunta).execute()
+# Função para verificar se um card já existe (baseado na pergunta e resposta)
+def card_existe(usuario, pergunta, resposta):
+    response = supabase.table("cards").select("id").eq("usuario", usuario).eq("pergunta", pergunta).eq("resposta", resposta).execute()
     return len(response.data) > 0
 
 # Função para salvar um card no Supabase
@@ -59,7 +59,7 @@ def atualizar_card(usuario, card_antigo, card_novo):
         "resposta": card_novo["resposta"],
         "referencia": card_novo["referencia"],
         "vezes_lido": card_novo["vezes_lido"]
-    }).eq("usuario", usuario).eq("pergunta", card_antigo["pergunta"]).execute()
+    }).eq("usuario", usuario).eq("pergunta", card_antigo["pergunta"]).eq("resposta", card_antigo["resposta"]).execute()
 
 # Função para excluir um card do Supabase usando o id
 def excluir_card(card_id):
@@ -106,6 +106,7 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
             item["lei"] == lei_escolhida and
             (
                 busca.lower() in item["pergunta"].lower() or
+                busca.lower() in item["resposta"].lower() or
                 busca.lower() in item["referencia"].lower()
             ) and (
                 filtro_leituras == "Todos" or
@@ -119,11 +120,11 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
 
     # Paginação
     PER_PAGE = 5
-    total_paginas = (len(perguntas_filtradas) - 1) // PER_PAGE + 1 if perguntas_filtradas else 1
+    total_paginas = max(1, (len(perguntas_filtradas) - 1) // PER_PAGE + 1)
 
     # Initialize or adjust pagina in session state
     if 'pagina' not in st.session_state or st.session_state['pagina'] > total_paginas:
-        st.session_state['pagina'] = min(st.session_state.get('pagina', 1), total_paginas)
+        st.session_state['pagina'] = 1
 
     pagina_atual = st.sidebar.number_input(
         "Página", min_value=1, max_value=total_paginas, value=st.session_state['pagina'], step=1
@@ -131,7 +132,7 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
     st.session_state['pagina'] = pagina_atual
 
     inicio = (pagina_atual - 1) * PER_PAGE
-    fim = inicio + PER_PAGE
+    fim = min(inicio + PER_PAGE, len(perguntas_filtradas))
     perguntas_pagina = perguntas_filtradas[inicio:fim]
 
     # EXIBIÇÃO DOS CARDS
@@ -159,18 +160,18 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
                 col1, col2, col3 = st.columns([1, 1, 1])
 
                 with col1:
-                    if st.button(f"✅ Lido ({item.get('vezes_lido', 0)}x)", key=f"btn_lido_{i}"):
+                    if st.button(f"✅ Lido ({item.get('vezes_lido', 0)}x)", key=f"btn_lido_{i}_{item['id']}"):
                         card_antigo = dados[i].copy()
                         dados[i]["vezes_lido"] = item.get("vezes_lido", 0) + 1
                         atualizar_card(usuario, card_antigo, dados[i])
                         st.rerun()
 
                 with col2:
-                    if st.button("✏️ Editar", key=f"editar_{i}"):
+                    if st.button("✏️ Editar", key=f"editar_{i}_{item['id']}"):
                         st.session_state["editar_index"] = i
 
                 with col3:
-                    if st.button("🗑️ Excluir", key=f"excluir_{i}"):
+                    if st.button("🗑️ Excluir", key=f"excluir_{i}_{item['id']}"):
                         if "id" in item:
                             excluir_card(item["id"])
                             dados.pop(i)
@@ -189,6 +190,9 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
             if pagina_atual < total_paginas and st.button("➡️ Próxima Página"):
                 st.session_state['pagina'] = pagina_atual + 1
                 st.rerun()
+
+    else:
+        st.info("ℹ️ Nenhum card encontrado com os filtros aplicados.")
 
     return perguntas_filtradas
 
@@ -246,7 +250,6 @@ if 'leituras' not in st.session_state:
 
 # Restaurar backup
 st.sidebar.markdown("🛠️ **Restaurar Backup**")
-# Verificar se a pasta backup existe antes de listar os arquivos
 if os.path.exists("backup"):
     arquivos_backup = sorted(
         [f for f in os.listdir("backup") if f.startswith(f"{usuario}_{session_id}")],
@@ -260,11 +263,10 @@ if arquivos_backup:
     if st.sidebar.button("♻️ Restaurar este backup"):
         caminho = os.path.join("backup", escolha_backup)
         dados_importados = carregar_dados_json(caminho)
-        # Limpar dados atuais do usuário no Supabase
         supabase.table("cards").delete().eq("usuario", usuario).execute()
-        # Salvar dados importados
         for item in dados_importados:
-            salvar_card(usuario, item)
+            if not card_existe(usuario, item["pergunta"], item["resposta"]):
+                salvar_card(usuario, item)
         dados = carregar_dados(usuario)
         st.sidebar.success("✅ Backup restaurado com sucesso!")
         st.rerun()
@@ -276,7 +278,6 @@ st.sidebar.markdown("📥 **Importar arquivo JSON personalizado**")
 arquivo_json = st.sidebar.file_uploader("Escolha um arquivo .json", type="json")
 
 if arquivo_json:
-    # Limitar tamanho do arquivo a 2MB
     if arquivo_json.size > 2 * 1024 * 1024:  # 2MB
         st.sidebar.error("❌ Arquivo muito grande! Limite: 2MB")
     elif st.sidebar.button("📂 Importar este arquivo"):
@@ -284,7 +285,7 @@ if arquivo_json:
         dados_importados = carregar_dados_json(arquivo_json)
         novos_cards = 0
         for item in dados_importados:
-            if not card_existe(usuario, item["pergunta"]):
+            if not card_existe(usuario, item["pergunta"], item["resposta"]):
                 salvar_card(usuario, item)
                 novos_cards += 1
         dados = carregar_dados(usuario)
@@ -311,9 +312,6 @@ if concurso_escolhido != "Selecionar":
             st.subheader("✧️ Editar Card")
             item = dados[idx]
 
-            concursos_cadastrados = sorted(set(d["concurso"] for d in dados if d.get("concurso")))
-            leis_cadastradas = sorted(set(d["lei"] for d in dados if d.get("lei")))
-
             with st.form(f"form_editar_{idx}"):
                 nova_pergunta = st.text_area("Pergunta (assunto)", value=item["pergunta"])
                 nova_resposta = st.text_area("Resposta (conteúdo)", value=item["resposta"])
@@ -325,6 +323,8 @@ if concurso_escolhido != "Selecionar":
                 if confirmar:
                     if not nova_concurso or not nova_lei or not nova_pergunta or not nova_resposta:
                         st.error("❌ Todos os campos obrigatórios devem ser preenchidos!")
+                    elif card_existe(usuario, nova_pergunta, nova_resposta) and (nova_pergunta != item["pergunta"] or nova_resposta != item["resposta"]):
+                        st.error("❌ Um card com esta pergunta e resposta já existe!")
                     else:
                         nova_pergunta_sanitizada = bleach.clean(
                             nova_pergunta,
@@ -428,6 +428,8 @@ with st.sidebar.form("form_novo_card"):
     if cadastrar:
         if not novo_concurso or not nova_lei or not nova_pergunta or not nova_resposta:
             st.sidebar.error("❌ Todos os campos obrigatórios devem ser preenchidos!")
+        elif card_existe(usuario, nova_pergunta, nova_resposta):
+            st.sidebar.error("❌ Um card com esta pergunta e resposta já existe!")
         else:
             nova_pergunta_sanitizada = bleach.clean(
                 nova_pergunta,
