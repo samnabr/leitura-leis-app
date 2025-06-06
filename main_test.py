@@ -19,8 +19,8 @@ except ImportError:
 st.set_page_config(page_title="Leitura de Leis por Cards", layout="centered")
 
 # Configuração do Supabase
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = "https://mgsauxixcqwxkclqbcva.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1nc2F1eGl4Y3F3eGtjbHFiY3ZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjUyMTksImV4cCI6MjA2NDcwMTIxOX0.aEqIe3konL294aJOwzfELPIPTaAg63F9dCkLETwxvYM"
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("❌ Erro: As credenciais do Supabase (SUPABASE_URL e SUPABASE_KEY) devem ser configuradas como variáveis de ambiente.")
     st.stop()
