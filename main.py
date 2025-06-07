@@ -8,6 +8,7 @@ from collections import defaultdict, Counter
 from datetime import datetime
 import time
 import uuid
+from streamlit_quill import st_quill
 
 # Carregar variáveis de ambiente
 try:
@@ -20,17 +21,54 @@ st.set_page_config(page_title="Leitura de Leis por Cards", layout="centered")
 
 # Configuração do Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("❌ Erro: As credenciais do Supabase (SUPABASE_URL e SUPABASE_KEY) devem ser configuradas como variáveis de ambiente.")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+if not SUPABASE_URL or not SUPABASE_ANON_KEY or not SUPABASE_SERVICE_KEY:
+    st.error("❌ Erro: As credenciais do Supabase (SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_KEY) devem ser configuradas como variáveis de ambiente.")
     st.stop()
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)  # Para operações gerais
+supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)  # Para operações administrativas como importação
 
-# Função para carregar os dados do Supabase
-def carregar_dados(usuario):
-    response = supabase.table("cards").select("*").eq("usuario", usuario).execute()
+# Função para carregar os dados do Supabase com paginação
+def carregar_dados(usuario, start, end):
+    response = supabase.table("cards").select("id, pergunta, resposta, referencia, concurso, lei, vezes_lido").eq("usuario", usuario).range(start, end).execute()
     dados = response.data if response.data else []
     return dados
+
+# Função para contar o total de cards para o usuário
+def contar_dados(usuario):
+    response = supabase.table("cards").select("id", count="exact").eq("usuario", usuario).execute()
+    return response.count if response.count else 0
+
+# Função para contar o total de cards para uma lei específica
+def contar_cards_por_lei(usuario, concurso, lei):
+    response = supabase.table("cards").select("id", count="exact").eq("usuario", usuario).eq("concurso", concurso).eq("lei", lei).execute()
+    return response.count if response.count else 0
+
+# Função para carregar todas as leis para estatísticas e seletores
+def carregar_leis(usuario):
+    response = supabase.table("cards").select("lei").eq("usuario", usuario).execute()
+    leis = sorted(set(item["lei"] for item in response.data if item.get("lei")))
+    return leis
+
+# Função para carregar estatísticas (para "Card mais lido por lei" e "Ranking de Leis Mais Lidas")
+def carregar_estatisticas(usuario, leis_selecionadas=None):
+    response = supabase.table("cards").select("lei, pergunta, vezes_lido").eq("usuario", usuario).execute()
+    dados = response.data if response.data else []
+    
+    leituras_por_lei = Counter()
+    mais_lido_por_lei = {}
+    
+    for item in dados:
+        lei = item.get("lei", "[Sem Lei]")
+        if leis_selecionadas and lei not in leis_selecionadas:
+            continue
+        leituras_por_lei[lei] += item.get("vezes_lido", 0)
+        if lei not in mais_lido_por_lei or item.get("vezes_lido", 0) > mais_lido_por_lei[lei].get("vezes_lido", 0):
+            mais_lido_por_lei[lei] = item
+    
+    mais_lidas = leituras_por_lei.most_common()
+    return mais_lidas, mais_lido_por_lei
 
 # Função para verificar se um card já existe (baseado na pergunta e resposta)
 def card_existe(usuario, pergunta, resposta):
@@ -48,7 +86,7 @@ def salvar_card(usuario, card):
         "referencia": card["referencia"],
         "vezes_lido": card["vezes_lido"]
     }
-    supabase.table("cards").insert(data).execute()
+    supabase_admin.table("cards").insert(data).execute()
 
 # Função para atualizar um card no Supabase
 def atualizar_card(usuario, card_antigo, card_novo):
@@ -89,7 +127,22 @@ def validar_usuario(usuario):
     return usuario
 
 # Função para exibir os cards filtrados e paginados
-def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
+def exibir_cards(dados, total_cards, concurso_escolhido, lei_escolhida, fonte, usuario):
+    # Ajustar o tamanho da fonte do título do expander via CSS sem interferir na animação
+    st.markdown(
+        f"""
+        <style>
+        div[data-testid="stExpander"] summary p {{
+            font-size: {fonte}px !important;
+        }}
+        div[data-testid="stExpander"] {{
+            transition: all 0.3s ease; /* Adicionar transição para animação */
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
     filtro_leituras = st.selectbox(
         "Filtrar cards por número de leituras:",
         ["Todos", "Nunca lidos", "1 ou mais", "5 ou mais", "10 ou mais"]
@@ -101,13 +154,16 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
     perguntas_filtradas = []
     for i, item in enumerate(dados):
         vezes = item.get("vezes_lido", 0)
+        concurso = item.get("concurso", "")
+        lei = item.get("lei", "")
         if (
-            item["concurso"] == concurso_escolhido and
-            item["lei"] == lei_escolhida and
+            concurso == concurso_escolhido and
+            lei == lei_escolhida and
             (
-                busca.lower() in item["pergunta"].lower() or
-                busca.lower() in item["resposta"].lower() or
-                busca.lower() in item["referencia"].lower()
+                not busca or
+                busca.lower() in item.get("pergunta", "").lower() or
+                busca.lower() in item.get("resposta", "").lower() or
+                busca.lower() in item.get("referencia", "").lower()
             ) and (
                 filtro_leituras == "Todos" or
                 (filtro_leituras == "Nunca lidos" and vezes == 0) or
@@ -117,6 +173,9 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
             )
         ):
             perguntas_filtradas.append((i, item))
+
+    # Contar o total de cards para a lei selecionada
+    total_cards_lei = contar_cards_por_lei(usuario, concurso_escolhido, lei_escolhida)
 
     # Paginação
     PER_PAGE = 5
@@ -133,52 +192,47 @@ def exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario):
 
     inicio = (pagina_atual - 1) * PER_PAGE
     fim = min(inicio + PER_PAGE, len(perguntas_filtradas))
-    perguntas_pagina = perguntas_filtradas[inicio:fim]
 
     # EXIBIÇÃO DOS CARDS
     if perguntas_filtradas:
-        st.markdown(f"### 📑 Cards Cadastrados ({len(perguntas_pagina)} de {len(perguntas_filtradas)} cards)")
+        st.markdown(f"### 📑 Cards Cadastrados ({len(perguntas_filtradas)} de {total_cards_lei} cards)")
 
-        for i, item in perguntas_pagina:
+        for i, (index, item) in enumerate(perguntas_filtradas[inicio:fim]):
             pergunta_sanitizada = bleach.clean(
-                item['pergunta'],
-                tags=['b', 'i', 'u', 'br'],
+                item.get('pergunta', ''),
+                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
                 strip=True
             )
             resposta_sanitizada = bleach.clean(
-                item['resposta'],
-                tags=['b', 'i', 'u', 'br'],
+                item.get('resposta', ''),
+                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
                 strip=True
             )
 
-            pergunta_label = bleach.clean(item['pergunta'], tags=[], strip=True)
+            pergunta_label = bleach.clean(item.get('pergunta', ''), tags=[], strip=True)
 
-            with st.expander(f"📌 Pergunta (assunto): {pergunta_label}"):
-                st.markdown(f"<div style='font-size: {fonte}px;'>{pergunta_sanitizada}</div>", unsafe_allow_html=True)
+            with st.expander(f"📌 Pergunta (assunto): {pergunta_label}", expanded=False):
                 st.markdown(f"<div style='font-size: {fonte}px;'><b>Resposta (conteúdo):</b> {resposta_sanitizada}</div>", unsafe_allow_html=True)
-                st.caption(f"📖 Referência: {item['referencia']}  \n📘 Lei: {item['lei']}  \n🎯 Concurso: {item.get('concurso', '[Sem Concurso]')}")
+                st.caption(f"📖 Referência: {item.get('referencia', '')}  \n📘 Lei: {item.get('lei', '')}  \n🎯 Concurso: {item.get('concurso', '[Sem Concurso]')}")
                 col1, col2, col3 = st.columns([1, 1, 1])
 
                 with col1:
-                    if st.button(f"✅ Lido ({item.get('vezes_lido', 0)}x)", key=f"btn_lido_{i}_{item['id']}"):
-                        card_antigo = dados[i].copy()
-                        dados[i]["vezes_lido"] = item.get("vezes_lido", 0) + 1
-                        atualizar_card(usuario, card_antigo, dados[i])
+                    if st.button(f"✅ Lido ({item.get('vezes_lido', 0)}x)", key=f"btn_lido_{i}_{item.get('id', '')}"):
+                        card_antigo = item.copy()
+                        item["vezes_lido"] = item.get("vezes_lido", 0) + 1
+                        atualizar_card(usuario, card_antigo, item)
+                        st.session_state['pagina'] = pagina_atual
                         st.rerun()
 
                 with col2:
-                    if st.button("✏️ Editar", key=f"editar_{i}_{item['id']}"):
-                        st.session_state["editar_index"] = i
+                    if st.button("✏️ Editar", key=f"editar_{i}_{item.get('id', '')}"):
+                        st.session_state["editar_id"] = item.get("id", "")  # Armazenar o ID do card
 
                 with col3:
-                    if st.button("🗑️ Excluir", key=f"excluir_{i}_{item['id']}"):
-                        if "id" in item:
-                            excluir_card(item["id"])
-                            dados.pop(i)
-                            st.warning("❌ Card excluído.")
-                            st.rerun()
-                        else:
-                            st.error("❌ Erro: ID do card não encontrado.")
+                    if st.button("🗑️ Excluir", key=f"excluir_{i}_{item.get('id', '')}"):
+                        excluir_card(item.get("id", ""))
+                        st.session_state['pagina'] = pagina_atual
+                        st.rerun()
 
         # Botões de navegação entre páginas
         col_pag1, col_pag2 = st.columns(2)
@@ -222,17 +276,15 @@ if not st.session_state['logged_in']:
 usuario = st.session_state['usuario']
 session_id = st.session_state['session_id']
 
-# Carregar os dados
-dados = carregar_dados(usuario)
+# Carregar o total de cards para paginação
+total_cards = contar_dados(usuario)
 
-# Garantir que todos os cards tenham o campo "vezes_lido"
-for d in dados:
-    if "vezes_lido" not in d:
-        d["vezes_lido"] = 0
+# Carregar todas as leis para os seletores
+leis_disponiveis = carregar_leis(usuario)
 
 # Interface do Sidebar
 st.sidebar.markdown("---")
-fonte = st.sidebar.slider("🔠 Tamanho da Fonte (px):", 12, 30, 16)
+fonte = st.sidebar.slider("🔠 Tamanho da Fonte (px):", 16, 48, 24)  # Aumentado o valor mínimo e padrão
 
 # Botão de Logout
 if st.sidebar.button("🚪 Sair"):
@@ -267,8 +319,9 @@ if arquivos_backup:
         for item in dados_importados:
             if not card_existe(usuario, item["pergunta"], item["resposta"]):
                 salvar_card(usuario, item)
-        dados = carregar_dados(usuario)
-        st.sidebar.success("✅ Backup restaurado com sucesso!")
+        total_cards = contar_dados(usuario)  # Atualizar total_cards após restauração
+        leis_disponiveis = carregar_leis(usuario)  # Atualizar leis_disponiveis
+        st.session_state['pagina'] = 1
         st.rerun()
 else:
     st.sidebar.caption("Nenhum backup encontrado.")
@@ -281,104 +334,121 @@ if arquivo_json:
     if arquivo_json.size > 2 * 1024 * 1024:  # 2MB
         st.sidebar.error("❌ Arquivo muito grande! Limite: 2MB")
     elif st.sidebar.button("📂 Importar este arquivo"):
-        criar_backup(dados, usuario, session_id)
+        criar_backup(carregar_dados(usuario, 0, total_cards - 1), usuario, session_id)
         dados_importados = carregar_dados_json(arquivo_json)
         novos_cards = 0
+        duplicados = 0
         for item in dados_importados:
             if not card_existe(usuario, item["pergunta"], item["resposta"]):
                 salvar_card(usuario, item)
                 novos_cards += 1
-        dados = carregar_dados(usuario)
-        st.sidebar.success(f"✅ {novos_cards} cards importados com sucesso!")
+                # Atualizar estado após cada inserção
+                total_cards = contar_dados(usuario)
+                leis_disponiveis = carregar_leis(usuario)
+            else:
+                duplicados += 1
+        st.session_state['pagina'] = 1
+        if duplicados > 0:
+            st.sidebar.success(f"✅ {novos_cards} cards importados com sucesso! {duplicados} cards ignorados por já estarem cadastrados.")
+        else:
+            st.sidebar.success(f"✅ {novos_cards} cards importados com sucesso!")
         st.rerun()
 
 st.markdown("## 🎯 Selecione um concurso para começar")
 
-concursos_disponiveis = sorted(set(d["concurso"] for d in dados if d.get("concurso")))
+concursos_disponiveis = sorted(set(d["concurso"] for d in carregar_dados(usuario, 0, total_cards - 1) if d.get("concurso")))
 concurso_escolhido = st.selectbox("Concurso:", ["Selecionar"] + concursos_disponiveis)
 
 if concurso_escolhido != "Selecionar":
-    leis_do_concurso = sorted(set(d["lei"] for d in dados if d.get("concurso") == concurso_escolhido))
+    leis_do_concurso = sorted(set(d["lei"] for d in carregar_dados(usuario, 0, total_cards - 1) if d.get("concurso") == concurso_escolhido and d.get("lei")))
     lei_escolhida = st.selectbox("📘 Lei do concurso:", ["Selecionar"] + leis_do_concurso)
 
     if lei_escolhida != "Selecionar":
         st.markdown(f"### Cards da Lei **{lei_escolhida}** para o Concurso **{concurso_escolhido}**")
-        perguntas_filtradas = exibir_cards(dados, concurso_escolhido, lei_escolhida, fonte, usuario)
+        dados_completos = carregar_dados(usuario, 0, total_cards - 1)  # Carregar todos os dados
+        perguntas_filtradas = exibir_cards(dados_completos, total_cards, concurso_escolhido, lei_escolhida, fonte, usuario)
 
         # ✏️ Editar Card
-        if "editar_index" in st.session_state:
-            idx = st.session_state["editar_index"]
+        if "editar_id" in st.session_state:
+            card_id = st.session_state["editar_id"]
             st.markdown("---")
             st.subheader("✧️ Editar Card")
-            item = dados[idx]
+            response = supabase.table("cards").select("*").eq("id", card_id).eq("usuario", usuario).execute()
+            item = response.data[0] if response.data else None
 
-            with st.form(f"form_editar_{idx}"):
-                nova_pergunta = st.text_area("Pergunta (assunto)", value=item["pergunta"])
-                nova_resposta = st.text_area("Resposta (conteúdo)", value=item["resposta"])
-                nova_referencia = st.text_input("Referência", value=item["referencia"])
-                nova_concurso = st.text_input("Concurso", value=item["concurso"])
-                nova_lei = st.text_input("Lei", value=item["lei"])
-                confirmar = st.form_submit_button("Salvar alterações")
+            if item:
+                with st.form(f"form_editar_{card_id}"):
+                    nova_pergunta = st_quill(
+                        value=item["pergunta"],
+                        placeholder="Digite a pergunta (assunto)...",
+                        toolbar=["bold", "italic", "underline", "link", "list"],
+                        html=True
+                    )
+                    nova_resposta = st_quill(
+                        value=item["resposta"],
+                        placeholder="Digite a resposta (conteúdo)...",
+                        toolbar=["bold", "italic", "underline", "link", "list"],
+                        html=True
+                    )
+                    nova_referencia = st.text_input("Referência", value=item["referencia"])
+                    nova_concurso = st.text_input("Concurso", value=item["concurso"])
+                    nova_lei = st.text_input("Lei", value=item["lei"])
+                    confirmar = st.form_submit_button("Salvar alterações")
 
-                if confirmar:
-                    if not nova_concurso or not nova_lei or not nova_pergunta or not nova_resposta:
-                        st.error("❌ Todos os campos obrigatórios devem ser preenchidos!")
-                    elif card_existe(usuario, nova_pergunta, nova_resposta) and (nova_pergunta != item["pergunta"] or nova_resposta != item["resposta"]):
-                        st.error("❌ Um card com esta pergunta e resposta já existe!")
-                    else:
-                        nova_pergunta_sanitizada = bleach.clean(
-                            nova_pergunta,
-                            tags=['b', 'i', 'u', 'br'],
-                            strip=True
-                        )
-                        nova_resposta_sanitizada = bleach.clean(
-                            nova_resposta,
-                            tags=['b', 'i', 'u', 'br'],
-                            strip=True
-                        )
+                    if confirmar:
+                        if not nova_concurso or not nova_lei or not nova_pergunta or not nova_resposta:
+                            st.error("❌ Todos os campos obrigatórios devem ser preenchidos!")
+                        elif card_existe(usuario, nova_pergunta, nova_resposta) and (nova_pergunta != item["pergunta"] or nova_resposta != item["resposta"]):
+                            st.error("❌ Um card com esta pergunta e resposta já existe!")
+                        else:
+                            nova_pergunta_sanitizada = bleach.clean(
+                                nova_pergunta,
+                                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
+                                strip=True
+                            )
+                            nova_resposta_sanitizada = bleach.clean(
+                                nova_resposta,
+                                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
+                                strip=True
+                            )
 
-                        novo_card = {
-                            "usuario": usuario,
-                            "pergunta": nova_pergunta_sanitizada,
-                            "resposta": nova_resposta_sanitizada,
-                            "referencia": nova_referencia,
-                            "concurso": nova_concurso,
-                            "lei": nova_lei,
-                            "vezes_lido": item.get("vezes_lido", 0)
-                        }
-                        atualizar_card(usuario, item, novo_card)
-                        dados[idx] = novo_card
-                        del st.session_state["editar_index"]
-                        st.success("✅ Sucesso ao alterar!")
-                        time.sleep(1)
-                        st.rerun()
+                            novo_card = {
+                                "usuario": usuario,
+                                "pergunta": nova_pergunta_sanitizada,
+                                "resposta": nova_resposta_sanitizada,
+                                "referencia": nova_referencia,
+                                "concurso": nova_concurso,
+                                "lei": nova_lei,
+                                "vezes_lido": item.get("vezes_lido", 0)
+                            }
+                            atualizar_card(usuario, item, novo_card)
+                            del st.session_state["editar_id"]
+                            st.session_state['pagina'] = 1
+                            st.rerun()
 
 # ESTATÍSTICAS
-leituras_por_lei = Counter()
-mais_lido_por_lei = {}
-
-for item in dados:
-    lei = item.get("lei", "[Sem Lei]")
-    leituras_por_lei[lei] += item.get("vezes_lido", 0)
-    if lei not in mais_lido_por_lei or item.get("vezes_lido", 0) > mais_lido_por_lei[lei].get("vezes_lido", 0):
-        mais_lido_por_lei[lei] = item
-
-mais_lidas = leituras_por_lei.most_common(5)
-
 st.sidebar.markdown("---")
 st.sidebar.markdown("📊 **Ranking de Leis Mais Lidas**")
+leis_selecionadas_ranking = st.sidebar.multiselect(
+    "Selecione as leis para o ranking:", leis_disponiveis, default=leis_disponiveis[:5] if len(leis_disponiveis) > 5 else leis_disponiveis
+)
+mais_lidas, _ = carregar_estatisticas(usuario, leis_selecionadas_ranking)
 for lei, total in mais_lidas:
     st.sidebar.markdown(f"**{lei}** — {total} leituras")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("🔥 **Card mais lido por lei**")
+leis_selecionadas_mais_lido = st.sidebar.multiselect(
+    "Selecione as leis para os cards mais lidos:", leis_disponiveis, default=leis_disponiveis[:5] if len(leis_disponiveis) > 5 else leis_disponiveis
+)
+_, mais_lido_por_lei = carregar_estatisticas(usuario, leis_selecionadas_mais_lido)
 for lei, item in mais_lido_por_lei.items():
     st.sidebar.markdown(f"**{lei}** → *{item['pergunta'][:50]}...* ({item['vezes_lido']}x)")
 
 # Exportar para Word (Seletivo)
 st.sidebar.markdown("📄 **Exportar para Word**")
 export_concurso = st.sidebar.selectbox("Exportar cards do concurso:", ["Todos"] + concursos_disponiveis)
-export_lei = st.sidebar.selectbox("Exportar cards da lei:", ["Todas"] + sorted(set(d["lei"] for d in dados if d.get("lei"))))
+export_lei = st.sidebar.selectbox("Exportar cards da lei:", ["Todas"] + sorted(set(d["lei"] for d in carregar_dados(usuario, 0, total_cards - 1) if d.get("lei"))))
 
 if st.sidebar.button("⬇️ Baixar cards selecionados em Word"):
     from docx import Document
@@ -386,7 +456,7 @@ if st.sidebar.button("⬇️ Baixar cards selecionados em Word"):
     doc = Document()
     doc.add_heading("Cards de Estudo", 0)
 
-    cards_filtrados = dados
+    cards_filtrados = carregar_dados(usuario, 0, total_cards - 1)
     if export_concurso != "Todos":
         cards_filtrados = [d for d in cards_filtrados if d.get("concurso") == export_concurso]
     if export_lei != "Todas":
@@ -419,10 +489,18 @@ st.sidebar.markdown("➕ **Cadastrar Novo Card**")
 with st.sidebar.form("form_novo_card"):
     novo_concurso = st.text_input("Concurso")
     nova_lei = st.text_input("Lei")
-    nova_pergunta = st.text_area("Pergunta (assunto)")
-    nova_resposta = st.text_area("Resposta (conteúdo)")
+    nova_pergunta = st_quill(
+        placeholder="Digite a pergunta (assunto)...",
+        toolbar=["bold", "italic", "underline", "link", "list"],
+        html=True
+    )
+    nova_resposta = st_quill(
+        placeholder="Digite a resposta (conteúdo)...",
+        toolbar=["bold", "italic", "underline", "link", "list"],
+        html=True
+    )
     nova_referencia = st.text_input("Referência")
-    st.caption("Nota: Você pode colar texto com formatação HTML básica (ex.: <b>negrito</b>, <i>itálico</i>) e ela será preservada.")
+    st.caption("Use o editor para formatar o texto com negrito, itálico, sublinhado, links e listas.")
     cadastrar = st.form_submit_button("📌 Adicionar Card")
 
     if cadastrar:
@@ -433,12 +511,12 @@ with st.sidebar.form("form_novo_card"):
         else:
             nova_pergunta_sanitizada = bleach.clean(
                 nova_pergunta,
-                tags=['b', 'i', 'u', 'br'],
+                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
                 strip=True
             )
             nova_resposta_sanitizada = bleach.clean(
                 nova_resposta,
-                tags=['b', 'i', 'u', 'br'],
+                tags=['b', 'i', 'u', 'br', 'p', 'ul', 'ol', 'li', 'strong', 'em'],
                 strip=True
             )
 
@@ -451,10 +529,10 @@ with st.sidebar.form("form_novo_card"):
                 "referencia": nova_referencia,
                 "vezes_lido": 0
             }
-            dados.append(novo_card)
             salvar_card(usuario, novo_card)
-            st.sidebar.success("✅ Card adicionado com sucesso!")
-            time.sleep(1)
+            total_cards = contar_dados(usuario)  # Atualizar total_cards após cadastro
+            leis_disponiveis = carregar_leis(usuario)  # Atualizar leis_disponiveis
+            st.session_state['pagina'] = 1
             st.rerun()
 
 st.sidebar.markdown("---")
